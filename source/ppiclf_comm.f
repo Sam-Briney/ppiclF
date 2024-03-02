@@ -725,7 +725,8 @@ c-----------------------------------------------------------------------
 !
       logical partl    
       integer*4 lrf
-      parameter(lrf = PPICLF_LRS*4 + PPICLF_LRP + PPICLF_LRP2)
+      parameter(lrf = PPICLF_LRS*4 + PPICLF_LRP + PPICLF_LRP2
+     >       + PPICLF_LRP3)
       real*8 rwork(lrf,PPICLF_LPART)
       integer*4 i, ic, j0
 !
@@ -744,6 +745,8 @@ c-----------------------------------------------------------------------
          call ppiclf_copy(rwork(ic,i),ppiclf_rprop(1,i),PPICLF_LRP)
          ic = ic + PPICLF_LRP
          call ppiclf_copy(rwork(ic,i),ppiclf_rprop2(1,i),PPICLF_LRP2)
+         ic = ic + PPICLF_LRP2
+         call ppiclf_copy(rwork(ic,i),ppiclf_rprop3(1,i),PPICLF_LRP3)
       enddo
 
       j0 = 4
@@ -771,6 +774,8 @@ c-----------------------------------------------------------------------
          call ppiclf_copy(ppiclf_rprop(1,i),rwork(ic,i),PPICLF_LRP)
          ic = ic + PPICLF_LRP
          call ppiclf_copy(ppiclf_rprop2(1,i),rwork(ic,i),PPICLF_LRP2)
+         ic = ic + PPICLF_LRP2
+         call ppiclf_copy(ppiclf_rprop3(1,i),rwork(ic,i),PPICLF_LRP3)
       enddo
         
       return

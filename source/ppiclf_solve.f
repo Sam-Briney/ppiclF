@@ -78,6 +78,7 @@
       implicit none
 !
       include "PPICLF"
+      include 'mpif.h'
 !
 ! Input: 
 !
@@ -85,8 +86,11 @@
       integer*4  ndim
       integer*4  iendian
       integer*4  npart
+      integer*4  ierr
       real*8     y(*)
       real*8     rprop(*)
+!
+      call mpi_barrier(ppiclf_comm,ierr)
 !
       if (.not.PPICLF_LCOMM)
      >call ppiclf_exittr('InitMPI must be before InitParticle$',0.0d0
@@ -103,10 +107,14 @@
          call ppiclf_prints('   *Begin InitParam$')
             call ppiclf_solve_InitParam(imethod,ndim,iendian)
          call ppiclf_prints('    End InitParam$')
-         
+
          if (.not. PPICLF_RESTART) then
-            call ppiclf_solve_InitZero
-            call ppiclf_solve_AddParticles(npart,y,rprop)
+            call ppiclf_prints('   *Begin InitZero$')
+               call ppiclf_solve_InitZero
+            call ppiclf_prints('   *End InitZero$')
+            call ppiclf_prints('   *Begin AddParticles$')
+               call ppiclf_solve_AddParticles(npart,y,rprop)
+            call ppiclf_prints('   *End AddParticles$')
 
             call ppiclf_prints('   *Begin WriteParticleVTU$')
                call ppiclf_io_WriteParticleVTU('')
@@ -119,8 +127,11 @@
 !     call ppiclf_prints('    End WriteBinVTU$')
 
       call ppiclf_prints(' End InitParticle$')
+!
+      call mpi_barrier(ppiclf_comm,ierr)
+!
 
-            call ppiclf_io_OutputDiagGen
+      call ppiclf_io_OutputDiagGen
 
       PPICLF_LINIT = .true.
 
@@ -337,6 +348,9 @@
       do j=1,PPICLF_LRP2
          ppiclf_rprop2(j,i) = 0.0d0
       enddo
+      do j=1,PPICLF_LRP3
+         ppiclf_rprop3(j,i) = 0.0d0
+      enddo
       do j=1,PPICLF_LIP
          ppiclf_iprop(j,i) = 0
       enddo
@@ -354,6 +368,8 @@
       enddo
       enddo
       enddo
+
+      !!call ppiclf_user_InitZero
 
       return
       end
@@ -1739,6 +1755,8 @@ c----------------------------------------------------------------------
      >              (ppiclf_rprop (1,ic),ppiclf_rprop(1,i) ,PPICLF_LRP)
                call ppiclf_copy
      >              (ppiclf_rprop2(1,ic),ppiclf_rprop2(1,i),PPICLF_LRP2)
+               call ppiclf_copy
+     >              (ppiclf_rprop3(1,ic),ppiclf_rprop3(1,i),PPICLF_LRP3)
                call ppiclf_icopy
      >              (ppiclf_iprop(1,ic) ,ppiclf_iprop(1,i) ,PPICLF_LIP)
             endif
@@ -1977,8 +1995,8 @@ c----------------------------------------------------------------------
                  if (ppiclf_el_map(5,ie) .gt. jhigh) cycle
                  if (ppiclf_el_map(6,ie) .lt. jlow)  cycle
                  if (if3d) then
-                 if (ppiclf_el_map(7,ie) .gt. khigh) cycle
-                 if (ppiclf_el_map(8,ie) .lt. klow)  cycle
+                    if (ppiclf_el_map(7,ie) .gt. khigh) cycle
+                    if (ppiclf_el_map(8,ie) .lt. klow)  cycle
                  endif
   
            do k=1,PPICLF_LEZ
@@ -2060,90 +2078,93 @@ c----------------------------------------------------------------------
              if ((ie .lt. 1) .or. (ie .gt. ppiclf_neltb)) cycle
 
              ! Sam - general hexahedron volume calculation
-             if (if3d) then
-               ! get centroid of hexahedron
-               do ix=1,3
-                 centroid(ix) = 0.0
-               end do
-
-               do ix=1,3
-               do k=1,PPICLF_LEZ
-               do j=1,PPICLF_LEY
-               do i=1,PPICLF_LEX
-                 centroid(ix) = centroid(ix) + ppiclf_xm1b(i,j,k,ix,ie)
-               end do
-               end do
-               end do
-               end do
-
-               do ix=1,3
-                 centroid(ix) = centroid(ix) / 8.0
-               end do
-
-
-               ! calculate volume based on two contributions from each
-               ! face as tetrahedrons
-               evol = 0.0
-               do ix=1,3
-                 do iface=1,2
-
-                   ! get face coordinates
-                   do j=1,2
-                   do i=1,2
-                   do ix2=1,3
-                     face(i,j,ix2) = ppiclf_xm1b(
-     >                                 face_map(ix,iface,i,j,1),
-     >                                 face_map(ix,iface,i,j,2),
-     >                                 face_map(ix,iface,i,j,3),
-     >                                 ix2,ie)
-                   end do
-                   end do
-                   end do
-
-                   do ix2=1,3
-                     v1(ix2) = face(1,2,ix2) - face(2,1,ix2)
-                     v2(ix2) = centroid(ix2) - face(2,1,ix2)
-                   end do ! ix2
-
-                   ! take cross product
-                   cross(1) = v1(2)*v2(3) - v1(3)*v2(2)
-                   cross(2) = v1(3)*v2(1) - v1(1)*v2(3)
-                   cross(3) = v1(1)*v2(2) - v1(2)*v2(1)
-
-                   ! get contriubtions to volume from each tetrahedron
-                   do inode=1,2
-                   do ix2=1,3
-                     v3(ix2) = face(inode,inode,ix2) - face(2,1,ix2)
-                   end do ! ix2
-
-                   ! really 6 times the volume of the tet, but we can
-                   ! save an operation by dividing at the end
-                   voltet = 0.0
-                   do ix2=1,3
-                     voltet = voltet + v3(ix2)*cross(ix2)
-                   end do ! ix2
-                   evol = evol + abs(voltet)
-                   end do ! inode
-                   
-                 end do ! iface
-               end do ! ix
-               evol = evol / 6.0
-             else
+!             if (if3d) then
+!               ! get centroid of hexahedron
+!               do ix=1,3
+!                 centroid(ix) = 0.0
+!               end do
+!
+!               do ix=1,3
+!               do k=1,PPICLF_LEZ
+!               do j=1,PPICLF_LEY
+!               do i=1,PPICLF_LEX
+!                 centroid(ix) = centroid(ix) + ppiclf_xm1b(i,j,k,ix,ie)
+!               end do
+!               end do
+!               end do
+!               end do
+!
+!               do ix=1,3
+!                 centroid(ix) = centroid(ix) / 8.0
+!               end do
+!
+!
+!               ! calculate volume based on two contributions from each
+!               ! face as tetrahedrons
+!               evol = 0.0
+!               do ix=1,3
+!                 do iface=1,2
+!
+!                   ! get face coordinates
+!                   do j=1,2
+!                   do i=1,2
+!                   do ix2=1,3
+!                     face(i,j,ix2) = ppiclf_xm1b(
+!     >                                 face_map(ix,iface,i,j,1),
+!     >                                 face_map(ix,iface,i,j,2),
+!     >                                 face_map(ix,iface,i,j,3),
+!     >                                 ix2,ie)
+!                   end do
+!                   end do
+!                   end do
+!
+!                   do ix2=1,3
+!                     v1(ix2) = face(1,2,ix2) - face(2,1,ix2)
+!                     v2(ix2) = centroid(ix2) - face(2,1,ix2)
+!                   end do ! ix2
+!
+!                   ! take cross product
+!                   cross(1) = v1(2)*v2(3) - v1(3)*v2(2)
+!                   cross(2) = v1(3)*v2(1) - v1(1)*v2(3)
+!                   cross(3) = v1(1)*v2(2) - v1(2)*v2(1)
+!
+!                   ! get contriubtions to volume from each tetrahedron
+!                   do inode=1,2
+!                   do ix2=1,3
+!                     v3(ix2) = face(inode,inode,ix2) - face(2,1,ix2)
+!                   end do ! ix2
+!
+!                   ! really 6 times the volume of the tet, but we can
+!                   ! save an operation by dividing at the end
+!                   voltet = 0.0
+!                   do ix2=1,3
+!                     voltet = voltet + v3(ix2)*cross(ix2)
+!                   end do ! ix2
+!                   evol = evol + abs(voltet)
+!                   end do ! inode
+!                   
+!                 end do ! iface
+!              end do ! ix
+!               evol = evol / 6.0
+!             else
                ! Sam - default to naive solution for 2D. ASSUMES
                ! rectangular elements. This will
                ! probably never get used, but if it does throw an error
                ! so the user is absolutely sure of what they're doing.
-               call ppiclf_exittr('Single element projection only
-     >          supported in 3D for general hex elements. Comment and
-     >          ignore this error if your elements are perfect
-     >          rectangles. $',0.0d0,0)
+!               call ppiclf_exittr('Single element projection only
+!     >          supported in 3D for general hex elements. Comment and
+!     >          ignore this error if your elements are perfect
+!     >          rectangles. $',0.0d0,0)
 
                evol = (ppiclf_xm1b(PPICLF_LEX,1,1,1,ie) 
      >               - ppiclf_xm1b(1,1,1,1,ie))
                evol = evol
      >              * (ppiclf_xm1b(1,PPICLF_LEY,1,2,ie) 
      >               - ppiclf_xm1b(1,1,1,2,ie))
-             end if ! if3d
+               if (if3d) evol = evol
+     >              * (ppiclf_xm1b(1,1,PPICLF_LEZ,3,ie) 
+     >               - ppiclf_xm1b(1,1,1,3,ie))
+!            end if ! if3d
 
              rexp = 1.0 / evol
            do k=1,PPICLF_LEZ
