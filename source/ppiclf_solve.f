@@ -1769,16 +1769,8 @@ c     ndum    = ppiclf_neltb*n
 
             enddo
 
-            !print *, ip, ppiclf_rprop(PPICLF_R_JRHOF, ip)
-
         endif ! nnearest
       enddo ! ip
-
-      !call mpi_barrier(ppiclf_comm,ierr)
-      !print *, 'barrier'
-
-      !print *, 'rho', -1, ppiclf_rprop(PPICLF_R_JRHOF, 1)
-
 
       ! reset here instead of in finalize
       !PPICLF_INT_ICNT = 0
