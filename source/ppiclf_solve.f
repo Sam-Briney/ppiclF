@@ -1268,7 +1268,12 @@ c----------------------------------------------------------------------
       enddo
       call ppiclf_solve_FinalizeInterp
 
+      call ppiclf_solve_LocalInterp
+
       call ppiclf_solve_PostInterp
+
+      PPICLF_INT_ICNT = 0
+
 
       return
       end
@@ -1457,16 +1462,19 @@ c     ndum    = ppiclf_neltb*n
      >                      ,ppiclf_int_fld(1,1,1,i,ie),nxyz)
          enddo
 
+         ! sam commenting out eval nearest neighbor to use Local Interp instead
+         ! leaving findpts call to help with projection, where the element id is
+         ! needed. 
          ! interpolate field locally
-         call pfgslib_findpts_eval_local( PPICLF_FP_HNDL
-     >                                  ,ppiclf_rprop (jp,1)
-     >                                  ,PPICLF_LRP
-     >                                  ,ppiclf_iprop (2,1)
-     >                                  ,PPICLF_LIP
-     >                                  ,ppiclf_rprop2(1,1)
-     >                                  ,PPICLF_LRP2
-     >                                  ,PPICLF_NPART
-     >                                  ,fld)
+!         call pfgslib_findpts_eval_local( PPICLF_FP_HNDL
+!     >                                  ,ppiclf_rprop (jp,1)
+!     >                                  ,PPICLF_LRP
+!     >                                  ,ppiclf_iprop (2,1)
+!     >                                  ,PPICLF_LIP
+!     >                                  ,ppiclf_rprop2(1,1)
+!     >                                  ,PPICLF_LRP2
+!     >                                  ,PPICLF_NPART
+!     >                                  ,fld)
 
       enddo
 
@@ -1474,7 +1482,306 @@ c     ndum    = ppiclf_neltb*n
       call pfgslib_findpts_free(PPICLF_FP_HNDL)
 
       ! Set interpolated fields to zero again
-      PPICLF_INT_ICNT = 0
+      ! Sam - commenting out for local routine
+      !PPICLF_INT_ICNT = 0
+
+      return
+      end
+!-----------------------------------------------------------------------
+      subroutine ppiclf_solve_LocalInterp
+      implicit none
+
+      include "PPICLF"
+
+      ! internal
+      integer*4 i,j,k,l,ix,iy,iz
+      integer*4 ip, ie, iee, inearest(28), nnearest, nxyz, neltgg
+      real*8 A(27, 4), d2i, d2(28), centeri(3), xp(3), center(3, 28)
+      real*8 U(27, 27), SIG(4), Vt(4, 4), b(27, 1)
+      real*8 interp(4, 1) ! for SVD
+      integer*4 m, n, lda, ldu, ldvt, lwork, info, ierr
+      real*8 w(27), wsum, eps
+      real*8 work(5*27+4)
+      character jobu, jobv
+      logical added, indg(28)
+
+      integer*4 nl, nii, njj, nkey(2), nrr
+      logical partl
+
+      eps = 1.0e-12
+
+
+      nxyz = PPICLF_LEX*PPICLF_LEY*PPICLF_LEZ
+
+
+      do ie=1,ppiclf_neltbbg
+         call ppiclf_icopy(ppiclf_er_mapgc(1,ie),ppiclf_er_mapgs(1,ie)
+     >             ,PPICLF_LRMAX)
+      enddo
+
+      do ie=1,ppiclf_neltbbg
+         iee = ppiclf_er_mapgc(1, ie)
+         call ppiclf_copy(ppiclf_int_fldg(1,1,1,1,ie)
+     >   ,ppiclf_int_fld(1,1,1,1,iee),nxyz*PPICLF_LRP_INT)
+      enddo
+
+      ! communicate ghost flow interpolated properties
+      ! send it all
+      nl   = 0
+      nii  = PPICLF_LRMAX
+      njj  = 6
+      nxyz = PPICLF_LEX*PPICLF_LEY*PPICLF_LEZ
+      nrr  = nxyz*PPICLF_LRP_INT
+      nkey(1) = 2
+      nkey(2) = 1
+      neltgg = ppiclf_neltbbg
+
+!      call pfgslib_crystal_tuple_transfer(ppiclf_cr_hndl,ppiclf_neltbbb
+!     >      ,PPICLF_LEE,ppiclf_er_mapc,nii,partl,nl,ppiclf_int_fld
+!     >      ,nrr,njj)
+!      call pfgslib_crystal_tuple_sort    (ppiclf_cr_hndl,ppiclf_neltbbb
+!     >       ,ppiclf_er_mapc,nii,partl,nl,ppiclf_int_fld,nrr,nkey,2)
+
+
+      call pfgslib_crystal_tuple_transfer(ppiclf_cr_hndl,neltgg
+     >      ,PPICLF_LEE,ppiclf_er_mapgc,nii,partl,nl,ppiclf_int_fldg
+     >      ,nrr,njj)
+      call pfgslib_crystal_tuple_sort    (ppiclf_cr_hndl,neltgg
+     >       ,ppiclf_er_mapgc,nii,partl,nl,ppiclf_int_fldg,nrr,nkey,2)
+
+
+
+      ! neighbor search O(Nparticles * Nelements)
+      ! this should be switched to a KD tree for Log(Nelements) scaling
+      do ip=1,ppiclf_npart
+        ! particle center
+        xp(1) = ppiclf_y(PPICLF_JX, ip)
+        xp(2) = ppiclf_y(PPICLF_JY, ip)
+        xp(3) = ppiclf_y(PPICLF_JZ, ip)
+
+        nnearest = 0 ! number of nearby elements
+
+        do ie=1,28
+          inearest(ie) = -1 ! index of nearest elements
+          d2(ie) = 1E20 ! distance to center of nearest element
+        enddo
+
+        do ie=1,ppiclf_neltbbb
+          ! calculate centroid - should definitely store this instead of
+          ! recalculating
+          do l=1,3
+            centeri(l) = 0
+          enddo
+
+          do l=1,3
+          do k=1,PPICLF_LEZ
+          do j=1,PPICLF_LEY
+          do i=1,PPICLF_LEX
+            centeri(l) = centeri(l) + ppiclf_xm1b(i, j, k, l, ie)
+          enddo
+          enddo
+          enddo
+          enddo
+
+          do l=1,3
+            centeri(l) = centeri(l) / nxyz
+          enddo
+
+          ! get distance from particle to center
+          d2i = 0
+          do l=1,3
+            d2i = d2i + (centeri(l) - xp(l))**2
+          enddo
+
+          ! sort
+          added = .false.
+          do i=1,27
+            j = 27 - i + 1
+
+            if (d2i .lt. d2(j)) then
+              d2(j+1) = d2(j)
+              inearest(j+1) = inearest(j)
+              do l=1,3
+                center(l, j+1) = center(l, j)
+              enddo
+              indg(j+1) = indg(j)
+
+              d2(j) = d2i
+              inearest(j) = ie
+              do l=1,3
+                center(l, j) = centeri(l)
+              enddo
+              indg(j) = .false. ! not a ghost particle
+
+              added = .true.
+              ! else 
+              !  break ! maybe use a goto in fortran
+            endif
+          enddo !i
+
+          if (added) nnearest = nnearest + 1
+          
+        enddo ! ie
+
+        ! ghost elements
+        do ie=1,neltgg
+          ! calculate centroid
+          do l=1,3
+            centeri(l) = 0
+          enddo
+
+          do l=1,3
+          do k=1,PPICLF_LEZ
+          do j=1,PPICLF_LEY
+          do i=1,PPICLF_LEX
+            centeri(l) = centeri(l) + ppiclf_xm1bg(i, j, k, l, ie)
+          enddo
+          enddo
+          enddo
+          enddo
+
+          do l=1,3
+            centeri(l) = centeri(l) / nxyz
+          enddo
+
+          ! get distance
+          d2i = 0
+          do l=1,3
+            d2i = d2i + (centeri(l) - xp(l))**2
+          enddo
+
+          ! sort
+          added = .false.
+          do i=1,27
+            j = 27 - i + 1
+
+            if (d2i .lt. d2(j)) then
+              d2(j+1) = d2(j)
+              inearest(j+1) = inearest(j)
+              do l=1,3
+                center(l, j+1) = center(l, j)
+              enddo
+              indg(j+1) = indg(j)
+
+              d2(j) = d2i
+              inearest(j) = ie
+              do l=1,3
+                center(l, j) = centeri(l)
+              enddo
+              indg(j) = .true. ! a ghost particle inndg = indicate ghost
+
+              added = .true.
+              ! else 
+              !  break ! maybe use a goto in fortran
+            endif
+          enddo !i
+
+          if (added) nnearest = nnearest + 1
+          
+        enddo ! ie
+
+        nnearest = min(nnearest, 27)
+
+        if (nnearest .lt. 1) then
+          print *, 'nnearest', nnearest, ip, ppiclf_npart, xp
+          print *, ppiclf_rprop(1:PPICLF_LRP, ip)
+          print *, ppiclf_y(1:PPICLF_LRS, ip)
+          print *, ppiclf_y(1:PPICLF_LRS, ip)
+          call ppiclf_exittr('Failed to interpolate',0.0d0,nnearest)
+        else
+            do i=1,nnearest
+              do j=1,3
+                A(i, j) = xp(j) - center(j, i)
+              end do
+              A(i, 4) = 1
+            enddo
+
+            do i=1,PPICLF_INT_ICNT
+
+              do k=1,nnearest
+                b(k, 1) = 0.0 ! cell averaged properties
+                if (.not. indg(k)) then ! not ghost
+                  do iz=1,PPICLF_LEZ
+                  do iy=1,PPICLF_LEY
+                  do ix=1,PPICLF_LEX
+                    b(k, 1) = b(k, 1) + ppiclf_int_fld(ix,iy,iz,i,
+     >                                  inearest(k))
+                  enddo
+                  enddo
+                  enddo
+                else ! ghost
+                  do iz=1,PPICLF_LEZ
+                  do iy=1,PPICLF_LEY
+                  do ix=1,PPICLF_LEX
+                    b(k, 1) = b(k, 1) + ppiclf_int_fldg(ix,iy,iz,i,
+     >                                  inearest(k))
+                  enddo
+                  enddo
+                  enddo
+                endif !indg
+
+                b(k, 1) = b(k, 1) / nxyz
+              enddo ! nnearest
+
+              ! linear interpolation, see Rocflu Manual for details. Not
+              ! validated. Requires lapack for SVD. 
+!              ! svd args
+!              m= nnearest
+!              n = 4
+!              lda = m
+!              ldu = m
+!              ldvt = n
+!              
+!              lwork = 5*27+4
+!
+!              jobu = 'A'
+!              jobv = 'S'
+!
+!              ! linear interpolation
+!              call dgesvd(jobu, jobv, m, n, A, lda, SIG, U, ldu, Vt,
+!     >                    ldvt, work, lwork, info)
+!
+!              ! SVD inversion
+!              b = matmul(transpose(U), b)
+!              do k=1,4
+!                b(k, 1) = b(k, 1)/SIG(k)
+!              enddo
+!
+!              interp = matmul(transpose(Vt), b(1:4, :))
+!
+!              ppiclf_rprop(j, ip) = interp(4, 1)
+
+              j = PPICLF_INT_MAP(i)
+
+              ! Nearest neighbor interpolation
+              !ppiclf_rprop(j, ip) = b(1, 1) ! nearest neighbor interpolation
+
+              ! "harmonic" interpolation
+              ppiclf_rprop(j, ip) = 0
+              wsum = 0
+              do k=1,nnearest
+                w(k) = 1.0d0 / (sqrt(d2(k)) + eps)
+                ppiclf_rprop(j, ip) = ppiclf_rprop(j, ip) + w(k)*b(k, 1)
+                wsum = wsum + w(k)
+              enddo
+
+              ppiclf_rprop(j, ip) = ppiclf_rprop(j, ip) / wsum
+
+            enddo
+
+            !print *, ip, ppiclf_rprop(PPICLF_R_JRHOF, ip)
+
+        endif ! nnearest
+      enddo ! ip
+
+      !call mpi_barrier(ppiclf_comm,ierr)
+      !print *, 'barrier'
+
+      !print *, 'rho', -1, ppiclf_rprop(PPICLF_R_JRHOF, 1)
+
+
+      ! reset here instead of in finalize
+      !PPICLF_INT_ICNT = 0
 
       return
       end
@@ -1567,20 +1874,21 @@ c     ndum    = ppiclf_nee*n
 
       do i=1,PPICLF_LRP_INT
 
+      ! sam - see finalize interp for note
          ! interpolate field (non-local)
-         call pfgslib_findpts_eval( fp_handle
-     >                                  ,coord (7+i,1)
-     >                                  ,rstride
-     >                                  ,flag (1,1)
-     >                                  ,istride
-     >                                  ,flag (3,1)
-     >                                  ,istride
-     >                                  ,flag (2,1)
-     >                                  ,istride
-     >                                  ,coord(4,1)
-     >                                  ,rstride
-     >                                  ,npart
-     >                                  ,ppiclf_int_fldu(1,1,1,1,i))
+!         call pfgslib_findpts_eval( fp_handle
+!     >                                  ,coord (7+i,1)
+!     >                                  ,rstride
+!     >                                  ,flag (1,1)
+!     >                                  ,istride
+!     >                                  ,flag (3,1)
+!     >                                  ,istride
+!     >                                  ,flag (2,1)
+!     >                                  ,istride
+!     >                                  ,coord(4,1)
+!     >                                  ,rstride
+!     >                                  ,npart
+!     >                                  ,ppiclf_int_fldu(1,1,1,1,i))
 
       enddo
 
