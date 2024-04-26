@@ -408,7 +408,7 @@ c     current box coordinates
       integer*4 icalld
       save      icalld
       data      icalld /0/
-      integer*4 nkey(2), i, j, k, ie, iee, ii, jj, kk, ndum, nrank,
+      integer*4 nkey(2), i, j, k,l, ie, iee, ii, jj, kk, ndum, nrank,
      >          nl, nii, njj, nrr, ilow, jlow, klow, nxyz, il,
      >          ihigh, jhigh, khigh, ierr
       real*8 rxval, ryval, rzval
@@ -420,36 +420,124 @@ c     current box coordinates
       real*8 xmin(3), xmax(3), xminb(3), xmaxb(3)
       integer*4 nsendg, iig(3), iin(3), iing(3)
 
-      ! see which bins are in which elements
-      ppiclf_neltb = 0
+      integer*4 ix, iy, iz, ixLow, ixHigh, iyLow,
+     >          iyHigh, izLow, izHigh
+      ! Avery - for largest cell size
+      real*8 EleSizei(3), MaxPoint(3), MinPoint(3)
+     
+      ppiclf_neltb = 0 !counts number of Rocflu elements on this processor
+                       !that are within one of the ppiclf bins
       do ie=1,ppiclf_nee
+      
+      ! Avery added - find cell max x,y,z lengths
+        do l=1,3
+          MaxPoint(l) = -1000000.0d0
+          MinPoint(l) =  1000000.0d0 
+          EleSizei(l) =  0.0d0
+          do k=1,PPICLF_LEZ
+          do j=1,PPICLF_LEY
+          do i=1,PPICLF_LEX
+            if (ppiclf_xm1b(i,j,k,l,ie) .gt. MaxPoint(l)) 
+     >          MaxPoint(l) = ppiclf_xm1b(i,j,k,l,ie)
+            if (ppiclf_xm1b(i,j,k,l,ie) .lt. MinPoint(l)) 
+     >          MinPoint(l) = ppiclf_xm1b(i,j,k,l,ie)
+          enddo !i
+          enddo !j
+          enddo !k
+          EleSizei(l) = 1.1d0*(MaxPoint(l) - MinPoint(l))
+        enddo !l 
+      ! Avery - end
+
       do k=1,PPICLF_LEZ
       do j=1,PPICLF_LEY
       do i=1,PPICLF_LEX
+         ! Grid positions without additional filter
          rxval = ppiclf_xm1bs(i,j,k,1,ie)
          ryval = ppiclf_xm1bs(i,j,k,2,ie)
          rzval = 0.0d0
          if(ppiclf_ndim.gt.2) rzval = ppiclf_xm1bs(i,j,k,3,ie)
-
-         if (rxval .gt. ppiclf_binb(2)) goto 1233
-         if (rxval .lt. ppiclf_binb(1)) goto 1233
-         if (ryval .gt. ppiclf_binb(4)) goto 1233
-         if (ryval .lt. ppiclf_binb(3)) goto 1233
+       
+         ! Exits is cell is outside of all bin boundaries
+         if (rxval .gt. ppiclf_binb(2)) goto 1255
+         if (rxval .lt. ppiclf_binb(1)) goto 1255
+         if (ryval .gt. ppiclf_binb(4)) goto 1255
+         if (ryval .lt. ppiclf_binb(3)) goto 1255
          if (ppiclf_ndim.gt.2 .and. rzval .gt. ppiclf_binb(6)) 
-     >      goto 1233
+     >      goto 1255
          if (ppiclf_ndim.gt.2 .and. rzval .lt. ppiclf_binb(5))
-     >      goto 1233
+     >      goto 1255
+ 
+         ! Determining what bin the grid is in
+         ii    = floor((rxval-ppiclf_binb(1))/ppiclf_bins_dx(1)) 
+         jj    = floor((ryval-ppiclf_binb(3))/ppiclf_bins_dx(2)) 
+         kk    = floor((rzval-ppiclf_binb(5))/ppiclf_bins_dx(3))
 
+         ! Default is Do loop with ix=iy=iz=2 for no filter
+         ixLow =2
+         ixHigh=2
+         iyLow =2
+         iyHigh=2
+         izLow =2
+         izHigh=2
+
+         ! These series of if statements check if near bin boundary 
+         ! Default is for no additional bin checks to be applied (do loop set to 2,2)
+         ! Add or subtract cell distance with Do loop if cell is near bin boundary
+         
+         if (floor((rxval + EleSizei(1) -ppiclf_binb(1))
+     >   /ppiclf_bins_dx(1)) .NE. ii) then
+         ixHigh = 3
+         endif
+
+         if (floor((rxval - EleSizei(1) -ppiclf_binb(1))
+     >   /ppiclf_bins_dx(1)) .NE. ii) then
+         ixLow = 1
+         endif
+
+         if (floor((ryval + EleSizei(2) -ppiclf_binb(3))
+     >   /ppiclf_bins_dx(2)) .NE. jj) then
+         iyHigh = 3
+         endif
+
+         if (floor((ryval - EleSizei(2) -ppiclf_binb(3))
+     >   /ppiclf_bins_dx(2)) .NE. jj) then
+         iyLow = 1
+         endif
+
+         if (ppiclf_ndim .gt. 2 .and. floor((rzval + EleSizei(3)
+     >   -ppiclf_binb(5))/ppiclf_bins_dx(3)) .NE. kk) then
+         izHigh = 3
+         endif
+
+         if (ppiclf_ndim .gt. 2 .and. floor((rzval - EleSizei(3)
+     >   -ppiclf_binb(5))/ppiclf_bins_dx(3)) .NE. kk) then
+         izLow = 1
+         endif
+
+      do ix=ixLow,ixHigh
+      do iy=iyLow,iyHigh
+      do iz=izLow,izHigh
+         
+         ! Changes r value by element size if near bin
+         rxval = ppiclf_xm1bs(i,j,k,1,ie) + (ix-2)*EleSizei(1)
+         ryval = ppiclf_xm1bs(i,j,k,2,ie) + (iy-2)*EleSizei(2)
+         rzval = 0.0d0
+         if(ppiclf_ndim.gt.2) rzval = ppiclf_xm1bs(i,j,k,3,ie)
+     >           + (iz-2)*EleSizei(3)
+
+         ! Finds correct bin indicies for cell
          ii    = floor((rxval-ppiclf_binb(1))/ppiclf_bins_dx(1)) 
          jj    = floor((ryval-ppiclf_binb(3))/ppiclf_bins_dx(2)) 
          kk    = floor((rzval-ppiclf_binb(5))/ppiclf_bins_dx(3)) 
          if (ppiclf_ndim.lt.3) kk = 0
-          if (ii .eq. ppiclf_n_bins(1)) ii = ppiclf_n_bins(1) - 1
-          if (jj .eq. ppiclf_n_bins(2)) jj = ppiclf_n_bins(2) - 1
-          if (kk .eq. ppiclf_n_bins(3)) kk = ppiclf_n_bins(3) - 1
-          if (ii .eq. -1) ii = 0
-          if (jj .eq. -1) jj = 0
-          if (kk .eq. -1) kk = 0
+         if (ii .eq. ppiclf_n_bins(1)) ii = ppiclf_n_bins(1) - 1
+         if (jj .eq. ppiclf_n_bins(2)) jj = ppiclf_n_bins(2) - 1
+         if (kk .eq. ppiclf_n_bins(3)) kk = ppiclf_n_bins(3) - 1
+         if (ii .eq. -1) ii = 0
+         if (jj .eq. -1) jj = 0
+         if (kk .eq. -1) kk = 0
+
+         ! Calculates processor rank
          ndum  = ii + ppiclf_n_bins(1)*jj + 
      >                ppiclf_n_bins(1)*ppiclf_n_bins(2)*kk
          nrank = ndum
@@ -481,10 +569,14 @@ c     current box coordinates
          enddo
          endif
  1233 continue
-      enddo
-      enddo
-      enddo
-      enddo
+      enddo !iz
+      enddo !iy
+      enddo !ix
+ 1255 continue ! When a cell is outside the bin boundary
+      enddo !k
+      enddo !i
+      enddo !j
+      enddo !ie
 
       nxyz = PPICLF_LEX*PPICLF_LEY*PPICLF_LEZ
       do ie=1,ppiclf_neltb
@@ -597,200 +689,6 @@ c     current box coordinates
          ppiclf_el_map(7,ie) = klow
          ppiclf_el_map(8,ie) = khigh
       enddo
-
-! Sam - communicate ghost cells for 1st order interpolation
-! First decide which cells need to go to which
-
-      ppiclf_d2chk(1) = max(ppiclf_d2chk(2),ppiclf_d2chk(3))
-
-      ! get local bin index, see formula for ndum earlier
-      ! Note that at this point, the elements have already been communicated to
-      ! their proper bins
-      iin(1) = modulo(ppiclf_nid,ppiclf_n_bins(1))
-      iin(2) = modulo(ppiclf_nid/ppiclf_n_bins(1),ppiclf_n_bins(2))
-      iin(3) = ppiclf_nid/(ppiclf_n_bins(1)*ppiclf_n_bins(2))
-
-      ! Get the edges of the bin for this processor, which is the bin this
-      ! element is in
-      do j=1,3
-        xminb(j) = iin(j)*ppiclf_bins_dx(j) + ppiclf_binb((j-1)*2 + 1)
-        xmaxb(j) = xminb(j) + ppiclf_bins_dx(j)
-      enddo
-
-      ppiclf_neltbg = 0 ! this variable is the number of ghost elements
-      do ie=1,ppiclf_neltb
-        ! get the maximum and minimum x, y, and z values for the element
-        ! This allows for worst case ghost cell communication
-        do j=1,3 ! x, y, z directions
-          ! get the worst case vertex of the cell
-          xmin(j) = ppiclf_vlmin(ppiclf_xm1b(1,1,1,j,ie), nxyz)
-          xmax(j) = ppiclf_vlmax(ppiclf_xm1b(1,1,1,j,ie), nxyz)
-
-          ! NOTE: current implementation ignores periodicity. 
-          ! This will need to be fixed
-  
-          ! check if particle is near a bin boundary
-          if (min(abs(xmin(j) - xminb(j)), abs(xmax(j) - xminb(j)))
-     >        .lt. ppiclf_d2chk(1)) then ! xmin boundary
-
-            iig(j) = iin(j) - 1
-
-          else if (min(abs(xmax(j) - xmaxb(j)), abs(xmin(j) - xmaxb(j)))
-     >          .lt.   ppiclf_d2chk(1)) then ! xmax boundary
-
-            iig(j) = iin(j) + 1
-          else
-            iig(j) = -1 ! not near a boundary - no need to communicate
-          endif
-  
-          ! if we are sending this element to another bin and the receiving bin
-          ! is valid
-          if ((iig(j) .gt. -1) .and. (iig(j) .lt. 
-     >        ppiclf_n_bins(j))) then
-
-            ppiclf_neltbg = ppiclf_neltbg + 1
-
-            ! copy iin to iing array
-            !call ppiclf_copy(iing(1), iin(1), 3)
-            !iing(j) = iig(j) ! modify iing array to index ghost bin
-
-            iing(1) = iin(1)
-            iing(2) = iin(2)
-            iing(3) = iin(3)
-
-            iing(j) = iig(j)
-
-            ! processor of the bin index iing
-            nrank = iing(1) + ppiclf_n_bins(1)*iing(2) + 
-     >                ppiclf_n_bins(1)*ppiclf_n_bins(2)*iing(3)
-  
-            ! this was a clunky first pass.
-!            if (j .eq. 1) then
-!              nrank = iing(1) + ppiclf_n_bins(1)*iin(2) + 
-!     >                  ppiclf_n_bins(1)*ppiclf_n_bins(2)*iin(3)
-!            else if (j .eq. 2) then
-!              nrank = iin(1) + ppiclf_n_bins(1)*iin(2) + 
-!     >                  ppiclf_n_bins(1)*ppiclf_n_bins(2)*iin(3)
-!            else
-!              nrank = iin(1) + ppiclf_n_bins(1)*iin(2) + 
-!     >                  ppiclf_n_bins(1)*ppiclf_n_bins(2)*iig(3)
-!            endif
-  
-            ! save to map for use in crystal router call later
-            ppiclf_er_mapg(1,ppiclf_neltbg) = ie
-            ppiclf_er_mapg(2,ppiclf_neltbg) = ppiclf_nid
-            ppiclf_er_mapg(3,ppiclf_neltbg) = nrank
-            ppiclf_er_mapg(4,ppiclf_neltbg) = nrank
-            ppiclf_er_mapg(5,ppiclf_neltbg) = nrank
-            ppiclf_er_mapg(6,ppiclf_neltbg) = nrank
-  
-            ! copy element to array for communication
-            call ppiclf_copy(ppiclf_xm1bg(1,1,1,1,ppiclf_neltbg),
-     >                       ppiclf_xm1b(1,1,1,1,ie), 3*nxyz)
-          end if
-        enddo ! j
-
-        ! edge cases
-        ! --------+--------+--------
-        !         +        +
-        !         +        + ghost
-        !         +        + cell
-        ! --------+--------+----------bin boundary
-        !         +   point+ 
-        !         +        +
-        !         +        +
-        ! --------+--------+--------
-        !
-        ! loop over pairs of directions
-        ! x, y; x, z; y, z
-        do i=1,2
-        do k=i+1,3
-
-          if ((iig(i) .gt. -1) .and. (iig(i) .lt. 
-     >        ppiclf_n_bins(i))) then
-          if ((iig(k) .gt. -1) .and. (iig(k) .lt. 
-     >        ppiclf_n_bins(k))) then
-
-            ppiclf_neltbg = ppiclf_neltbg + 1
-
-            iing(1) = iin(1)
-            iing(2) = iin(2)
-            iing(3) = iin(3)
-
-            ! similar to previous, but now the 2 bin indices need to change
-            iing(i) = iig(i)
-            iing(k) = iig(k)
-
-            nrank = iing(1) + ppiclf_n_bins(1)*iing(2) + 
-     >                ppiclf_n_bins(1)*ppiclf_n_bins(2)*iing(3)
-
-            ppiclf_er_mapg(1,ppiclf_neltbg) = ie
-            ppiclf_er_mapg(2,ppiclf_neltbg) = ppiclf_nid
-            ppiclf_er_mapg(3,ppiclf_neltbg) = nrank
-            ppiclf_er_mapg(4,ppiclf_neltbg) = nrank
-            ppiclf_er_mapg(5,ppiclf_neltbg) = nrank
-            ppiclf_er_mapg(6,ppiclf_neltbg) = nrank
-  
-            call ppiclf_copy(ppiclf_xm1bg(1,1,1,1,ppiclf_neltbg),
-     >                       ppiclf_xm1b(1,1,1,1,ie), 3*nxyz)
-
-          endif
-          endif
-
-        enddo
-        enddo
-
-        ! corner case - 3D version of edge cases
-       if ((iig(1) .gt. -1) .and. (iig(1) .lt. 
-     >     ppiclf_n_bins(1))) then
-       if ((iig(2) .gt. -1) .and. (iig(2) .lt. 
-     >     ppiclf_n_bins(2))) then
-       if ((iig(3) .gt. -1) .and. (iig(3) .lt. 
-     >     ppiclf_n_bins(3))) then
-
-         ppiclf_neltbg = ppiclf_neltbg + 1
-
-         ! no need to copy since all 3 indices are iig
-         nrank = iig(1) + ppiclf_n_bins(1)*iig(2) + 
-     >             ppiclf_n_bins(1)*ppiclf_n_bins(2)*iig(3)
-
-         ppiclf_er_mapg(1,ppiclf_neltbg) = ie
-         ppiclf_er_mapg(2,ppiclf_neltbg) = ppiclf_nid
-         ppiclf_er_mapg(3,ppiclf_neltbg) = nrank
-         ppiclf_er_mapg(4,ppiclf_neltbg) = nrank
-         ppiclf_er_mapg(5,ppiclf_neltbg) = nrank
-         ppiclf_er_mapg(6,ppiclf_neltbg) = nrank
-  
-         call ppiclf_copy(ppiclf_xm1bg(1,1,1,1,ppiclf_neltbg),
-     >                    ppiclf_xm1b(1,1,1,1,ie), 3*nxyz)
-
-       endif
-       endif
-       endif
-
-      end do !ie
-
-      do ie=1,ppiclf_neltbg
-         call ppiclf_icopy(ppiclf_er_mapgs(1,ie),ppiclf_er_mapg(1,ie)
-     >             ,PPICLF_LRMAX)
-      enddo
-
-      ! call crystal router to communicate ghost cells. Use the same map to
-      ! communicate ghost cell interpolated properties later.
-      nl   = 0
-      nii  = PPICLF_LRMAX
-      njj  = 6
-      nxyz = PPICLF_LEX*PPICLF_LEY*PPICLF_LEZ
-      nrr  = nxyz*3
-      nkey(1) = 2
-      nkey(2) = 1
-      ppiclf_neltbbg = ppiclf_neltbg
-      call pfgslib_crystal_tuple_transfer(ppiclf_cr_hndl,ppiclf_neltbg
-     >       ,PPICLF_LEE,ppiclf_er_mapg,nii,partl,nl,ppiclf_xm1bg,nrr,njj)
-      call pfgslib_crystal_tuple_sort    (ppiclf_cr_hndl,ppiclf_neltbg
-     >       ,ppiclf_er_mapg,nii,partl,nl,ppiclf_xm1bg,nrr,nkey,2)
-
-! Sam - end
 
       if (icalld .eq. 0) then 
 
